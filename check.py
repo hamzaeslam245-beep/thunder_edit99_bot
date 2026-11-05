@@ -1,69 +1,42 @@
 import requests, json, os, sys
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
-BASE = "https://egy.voxcinemas.com"
-# الفرع: city-centre-alexandria (إسكندرية) أو city-centre-almaza (ألماظة - القاهرة)
-CINEMA = os.environ.get("CINEMA", "city-centre-alexandria")
+# رابط صفحة سينما فوكس في سيتي سنتر إسكندرية
+URL = "https://egy.voxcinemas.com/movies/cinemas/alexandria-city-centre"
 TOKEN = os.environ["TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 FILE = "seen.json"
-HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-SOURCES = {
-    # أفلام نزلت على الموقع
-    "whatson": (f"{BASE}/movies/whatson", "🎬 فيلم جديد نزل في VOX: {name}\n{link}"),
-    # أفلام ليها حجز/مواعيد في الفرع ده
-    "booking": (f"{BASE}/showtimes?c={CINEMA}", "🎟️ الحجز اتفتح في {cinema}: {name}\n{link}#showtimes"),
-}
+html = requests.get(URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"}).text
+soup = BeautifulSoup(html, "html.parser")
 
+movies = {}
+# استخراج الأفلام من موقع فوكس (حسب تصميم الموقع للعناوين والروابط)
+for a in soup.select('a.movie-card, .movie-item a'):
+    name = a.get("title") or a.get_text(strip=True)
+    href = a.get("href")
+    if name and href:
+        movies[href] = name
 
-def send(text):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": text},
-        timeout=20,
-    )
-    r.raise_for_status()
+print(f"لقيت {len(movies)} فيلم")
 
+if not movies:
+    print("مفيش أفلام اتقرات")
+    sys.exit()
 
-def get_movies(url):
-    html = requests.get(url, timeout=20, headers=HEADERS).text
-    soup = BeautifulSoup(html, "html.parser")
-    movies = {}
-    for a in soup.select('a[href*="/movies/"]'):
-        href = a["href"].split("#")[0].split("?")[0]
-        slug = href.rstrip("/").split("/movies/")[-1]
-        if not slug or "/" in slug or slug in ("whatson", "comingsoon"):
-            continue
-        movies[slug] = slug.replace("-", " ").title()
-    return movies
+seen = set(json.load(open(FILE))) if os.path.exists(FILE) else set()
 
+if seen:
+    for href in movies.keys() - seen:
+        movie_name = movies[href]
+        movie_url = urljoin(URL, href)
+        requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            params={
+                "chat_id": CHAT_ID,
+                "text": f"فيلم جديد نزل في فوكس سيتي سنتر إسكندرية: {movie_name}\n{movie_url}"
+            },
+        )
 
-try:
-    seen = json.load(open(FILE, encoding="utf-8")) if os.path.exists(FILE) else {}
-except Exception:
-    seen = {}
-
-for key, (url, template) in SOURCES.items():
-    try:
-        movies = get_movies(url)
-    except requests.RequestException as e:
-        print(key, "فشل الاتصال:", e)
-        continue
-
-    print(key, "- لقيت", len(movies), "فيلم")
-    if not movies:
-        print(key, "- مفيش أفلام اتقرأت، يمكن شكل الصفحة اتغير")
-        continue
-
-    old = seen.get(key)
-    if old is None:
-        send(f"✅ البوت اشتغل ({key})، حفظت {len(movies)} فيلم حالياً. هبعتلك لما يظهر جديد.")
-    else:
-        for slug, name in movies.items():
-            if slug not in old:
-                send(template.format(name=name, cinema=CINEMA, link=f"{BASE}/movies/{slug}"))
-
-    seen[key] = sorted(set(old or []) | set(movies))
-
-json.dump(seen, open(FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+json.dump(list(seen.union(movies.keys())), open(FILE, "w"), ensure_ascii=False)
